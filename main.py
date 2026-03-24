@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -14,7 +15,6 @@ if not TELEGRAM_TOKEN:
 if not GROQ_API_KEY:
     raise RuntimeError("Missing GROQ_API_KEY env var")
 
-# Groq uses an OpenAI-compatible API
 client = OpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1",
@@ -22,7 +22,9 @@ client = OpenAI(
 
 SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", "You are a helpful, friendly AI assistant.")
 MODEL = os.getenv("MODEL", "llama-3.1-8b-instant")
-MAX_HISTORY = int(os.getenv("MAX_HISTORY", "24"))  # total messages stored (user+assistant)
+MAX_HISTORY = int(os.getenv("MAX_HISTORY", "24"))
+
+PORT = int(os.getenv("PORT", "10000"))  # Render provides PORT automatically
 
 
 def _get_history(context: ContextTypes.DEFAULT_TYPE):
@@ -46,7 +48,6 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # private only
     if update.effective_chat.type != "private":
         return
 
@@ -82,12 +83,37 @@ async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Something went wrong. Try again in a bit.")
 
 
-def main():
+async def health_server():
+    # Tiny HTTP server so Render detects an open port
+    async def handle(reader, writer):
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK"
+        )
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "0.0.0.0", PORT)
+    logging.info("Health server running on port %s", PORT)
+    async with server:
+        await server.serve_forever()
+
+
+async def main_async():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # run health server forever (keeps process alive)
+    await health_server()
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
